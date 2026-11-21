@@ -1,0 +1,1149 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Générer le projet LORD VPN
+        run: |
+          mkdir -p proj
+          cd proj
+          mkdir -p "$(dirname '.gitignore')"
+          cat > '.gitignore' <<'LORDEOF'
+          *.iml
+          .gradle/
+          local.properties
+          .idea/
+          build/
+          captures/
+          .DS_Store
+          *.jks
+          *.keystore
+          LORDEOF
+          mkdir -p "$(dirname 'README.md')"
+          cat > 'README.md' <<'LORDEOF'
+          # LORD VPN (Android)
+
+          Application VPN Android en Kotlin + Jetpack Compose.
+
+          ## État actuel (étapes 1 et 2)
+          - Gestion des serveurs : ajout, modification, suppression, sélection, ping TCP réel
+          - Import (fichier, presse-papiers), export et partage des configurations
+          - Stockage chiffré (Android Keystore)
+          - Thème noir / bleu nuit / bleu électrique
+          - Navigation (8 pages) et écran d accueil
+          - Compilation automatique de l APK via GitHub Actions
+
+          Le moteur VPN (Xray, SSH, SlowDNS), la gestion des serveurs et le backend
+          seront ajoutés dans les étapes suivantes.
+
+          ## Obtenir l APK
+          Onglet Actions > dernier run > section Artifacts > LORD-VPN-debug-apk.
+          LORDEOF
+          mkdir -p "$(dirname 'app/build.gradle.kts')"
+          cat > 'app/build.gradle.kts' <<'LORDEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.lordvpn"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.lordvpn"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.navigation:navigation-compose:2.7.7")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
+              implementation("androidx.security:security-crypto:1.1.0-alpha06")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/proguard-rules.pro')"
+          cat > 'app/proguard-rules.pro' <<'LORDEOF'
+
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'LORDEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.LordVpn">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:theme="@style/Theme.LordVpn">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/MainActivity.kt')"
+          cat > 'app/src/main/java/com/lordvpn/MainActivity.kt' <<'LORDEOF'
+          package com.lordvpn
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.navigation.compose.rememberNavController
+          import com.lordvpn.data.DepotServeurs
+          import com.lordvpn.ui.LordVpnApp
+          import com.lordvpn.ui.theme.LordVpnTheme
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  DepotServeurs.init(applicationContext)
+                  enableEdgeToEdge()
+                  setContent {
+                      LordVpnTheme {
+                          LordVpnApp(rememberNavController())
+                      }
+                  }
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/data/DepotServeurs.kt')"
+          cat > 'app/src/main/java/com/lordvpn/data/DepotServeurs.kt' <<'LORDEOF'
+          package com.lordvpn.data
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import androidx.security.crypto.EncryptedSharedPreferences
+          import androidx.security.crypto.MasterKey
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+          import org.json.JSONArray
+
+          /** Stockage chiffré (AES-256, clé dans l Android Keystore) des serveurs. */
+          object DepotServeurs {
+              private lateinit var prefs: SharedPreferences
+
+              private val _serveurs = MutableStateFlow<List<Serveur>>(emptyList())
+              val serveurs: StateFlow<List<Serveur>> = _serveurs
+
+              private val _selectionId = MutableStateFlow<String?>(null)
+              val selectionId: StateFlow<String?> = _selectionId
+
+              fun init(ctx: Context) {
+                  if (::prefs.isInitialized) return
+                  val cle = MasterKey.Builder(ctx)
+                      .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                      .build()
+                  prefs = EncryptedSharedPreferences.create(
+                      ctx, "lordvpn_serveurs", cle,
+                      EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                      EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                  )
+                  charger()
+              }
+
+              private fun charger() {
+                  val tableau = try { JSONArray(prefs.getString("liste", "[]")) } catch (e: Exception) { JSONArray() }
+                  val liste = ArrayList<Serveur>()
+                  for (i in 0 until tableau.length()) {
+                      try { liste.add(Serveur.depuisJson(tableau.getJSONObject(i))) } catch (e: Exception) { }
+                  }
+                  _serveurs.value = liste
+                  val sel = prefs.getString("selection", null)
+                  _selectionId.value = if (liste.any { it.id == sel }) sel else liste.firstOrNull()?.id
+              }
+
+              private fun sauver() {
+                  val tableau = JSONArray()
+                  _serveurs.value.forEach { tableau.put(it.versJson()) }
+                  prefs.edit()
+                      .putString("liste", tableau.toString())
+                      .putString("selection", _selectionId.value)
+                      .apply()
+              }
+
+              /** Ajoute les serveurs nouveaux (ignore les doublons). Retourne le nombre ajouté. */
+              fun ajouter(nouveaux: List<Serveur>): Int {
+                  val inedits = nouveaux.filter { n -> _serveurs.value.none { it.brut == n.brut } }
+                  _serveurs.value = _serveurs.value + inedits
+                  if (_selectionId.value == null) _selectionId.value = inedits.firstOrNull()?.id
+                  sauver()
+                  return inedits.size
+              }
+
+              fun supprimer(id: String) {
+                  _serveurs.value = _serveurs.value.filter { it.id != id }
+                  if (_selectionId.value == id) _selectionId.value = _serveurs.value.firstOrNull()?.id
+                  sauver()
+              }
+
+              fun remplacer(id: String, nouveau: Serveur) {
+                  _serveurs.value = _serveurs.value.map { if (it.id == id) nouveau else it }
+                  sauver()
+              }
+
+              fun selectionner(id: String) {
+                  _selectionId.value = id
+                  sauver()
+              }
+
+              /** Une configuration par ligne (le JSON est compacté sur une ligne). */
+              fun exporterTexte(): String = _serveurs.value.joinToString("\n") {
+                  if (it.brut.trimStart().startsWith("{")) {
+                      try { org.json.JSONObject(it.brut).toString() } catch (e: Exception) { it.brut }
+                  } else it.brut
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/data/Ping.kt')"
+          cat > 'app/src/main/java/com/lordvpn/data/Ping.kt' <<'LORDEOF'
+          package com.lordvpn.data
+
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import java.net.InetSocketAddress
+          import java.net.Socket
+
+          object Ping {
+              /** Délai réel d une connexion TCP en ms, ou null si le serveur est injoignable. */
+              suspend fun mesurer(hote: String, port: Int): Long? = withContext(Dispatchers.IO) {
+                  try {
+                      val debut = System.nanoTime()
+                      Socket().use { it.connect(InetSocketAddress(hote, port), 3000) }
+                      (System.nanoTime() - debut) / 1_000_000
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/data/Serveur.kt')"
+          cat > 'app/src/main/java/com/lordvpn/data/Serveur.kt' <<'LORDEOF'
+          package com.lordvpn.data
+
+          import org.json.JSONObject
+
+          enum class Protocole(val libelle: String) {
+              VLESS("VLESS"), VMESS("VMess"), TROJAN("Trojan"),
+              SHADOWSOCKS("Shadowsocks"), SSH("SSH")
+          }
+
+          val PAYS = listOf("Burkina Faso", "France", "Allemagne", "États-Unis", "Canada", "Autres pays")
+
+          /** [brut] = lien d origine ou JSON complet (contient les secrets, stocké chiffré). */
+          data class Serveur(
+              val id: String,
+              val nom: String,
+              val protocole: Protocole,
+              val hote: String,
+              val port: Int,
+              val pays: String,
+              val brut: String
+          ) {
+              fun versJson(): JSONObject = JSONObject()
+                  .put("id", id).put("nom", nom).put("protocole", protocole.name)
+                  .put("hote", hote).put("port", port).put("pays", pays).put("brut", brut)
+
+              companion object {
+                  fun depuisJson(o: JSONObject) = Serveur(
+                      o.getString("id"), o.getString("nom"),
+                      Protocole.valueOf(o.getString("protocole")),
+                      o.getString("hote"), o.getInt("port"),
+                      o.getString("pays"), o.getString("brut")
+                  )
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/parser/ParseurConfig.kt')"
+          cat > 'app/src/main/java/com/lordvpn/parser/ParseurConfig.kt' <<'LORDEOF'
+          package com.lordvpn.parser
+
+          import android.net.Uri
+          import android.util.Base64
+          import com.lordvpn.data.Protocole
+          import com.lordvpn.data.Serveur
+          import org.json.JSONObject
+          import java.net.URLDecoder
+          import java.util.UUID
+
+          object ParseurConfig {
+              private val PREFIXES = listOf("vless://", "vmess://", "trojan://", "ss://", "ssh://")
+
+              /** Accepte : un lien, plusieurs liens (un par ligne), ou un fichier JSON Xray. */
+              fun parseTexte(texte: String, pays: String): List<Serveur> {
+                  val t = texte.trim().trimStart('\uFEFF')
+                  if (t.isEmpty()) return emptyList()
+                  val lignes = t.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                  val modeLignes = lignes.all { l ->
+                      PREFIXES.any { l.startsWith(it) } || (l.startsWith("{") && l.endsWith("}"))
+                  }
+                  if (modeLignes) {
+                      return lignes.mapNotNull { if (it.startsWith("{")) parseJson(it, pays) else parseLien(it, pays) }
+                  }
+                  if (t.startsWith("{")) return listOfNotNull(parseJson(t, pays))
+                  return emptyList()
+              }
+
+              fun parseLien(lien: String, pays: String): Serveur? = try {
+                  when {
+                      lien.startsWith("vless://") -> parseStandard(lien, Protocole.VLESS, pays, 443, true)
+                      lien.startsWith("trojan://") -> parseStandard(lien, Protocole.TROJAN, pays, 443, true)
+                      lien.startsWith("ssh://") -> parseStandard(lien, Protocole.SSH, pays, 22, true)
+                      lien.startsWith("vmess://") -> parseVmess(lien, pays)
+                      lien.startsWith("ss://") -> parseSs(lien, pays)
+                      else -> null
+                  }
+              } catch (e: Exception) {
+                  null
+              }
+
+              private fun valide(hote: String?, port: Int): Boolean =
+                  !hote.isNullOrBlank() && port in 1..65535
+
+              private fun parseStandard(lien: String, p: Protocole, pays: String, portDefaut: Int, userInfoRequis: Boolean): Serveur? {
+                  val uri = Uri.parse(lien)
+                  val hote = uri.host
+                  val port = if (uri.port == -1) portDefaut else uri.port
+                  if (!valide(hote, port)) return null
+                  if (userInfoRequis && uri.userInfo.isNullOrBlank()) return null
+                  val nom = uri.fragment?.takeIf { it.isNotBlank() } ?: hote!!
+                  return Serveur(UUID.randomUUID().toString(), nom, p, hote!!, port, pays, lien)
+              }
+
+              private fun parseVmess(lien: String, pays: String): Serveur? {
+                  val json = JSONObject(decoderB64(lien.removePrefix("vmess://")))
+                  val hote = json.optString("add")
+                  val port = json.opt("port")?.toString()?.trim()?.toInt() ?: return null
+                  if (!valide(hote, port) || json.optString("id").isBlank()) return null
+                  val nom = json.optString("ps").ifBlank { hote }
+                  return Serveur(UUID.randomUUID().toString(), nom, Protocole.VMESS, hote, port, pays, lien)
+              }
+
+              private fun parseSs(lien: String, pays: String): Serveur? {
+                  val reste = lien.removePrefix("ss://")
+                  val nom0 = reste.substringAfter("#", "")
+                  val corps = reste.substringBefore("#").substringBefore("?")
+                  val creds: String
+                  val hotePort: String
+                  if (corps.contains("@")) {
+                      val info = corps.substringBeforeLast("@")
+                      hotePort = corps.substringAfterLast("@")
+                      creds = if (info.contains(":")) info else decoderB64(info)
+                  } else {
+                      val d = decoderB64(corps)
+                      if (!d.contains("@")) return null
+                      creds = d.substringBeforeLast("@")
+                      hotePort = d.substringAfterLast("@")
+                  }
+                  if (!creds.contains(":")) return null
+                  val hote = hotePort.substringBeforeLast(":").trim('[', ']')
+                  val port = hotePort.substringAfterLast(":").trim().toInt()
+                  if (!valide(hote, port)) return null
+                  val nom = if (nom0.isNotBlank()) URLDecoder.decode(nom0, "UTF-8") else hote
+                  return Serveur(UUID.randomUUID().toString(), nom, Protocole.SHADOWSOCKS, hote, port, pays, lien)
+              }
+
+              /** Fichier de configuration Xray (JSON) : lit le premier serveur sortant compatible. */
+              fun parseJson(texte: String, pays: String): Serveur? = try {
+                  val racine = JSONObject(texte)
+                  val sortants = racine.optJSONArray("outbounds")
+                  val candidats = ArrayList<JSONObject>()
+                  if (sortants != null) {
+                      for (i in 0 until sortants.length()) candidats.add(sortants.getJSONObject(i))
+                  } else if (racine.has("protocol")) {
+                      candidats.add(racine)
+                  }
+                  var resultat: Serveur? = null
+                  for (c in candidats) {
+                      val proto = when (c.optString("protocol").lowercase()) {
+                          "vless" -> Protocole.VLESS
+                          "vmess" -> Protocole.VMESS
+                          "trojan" -> Protocole.TROJAN
+                          "shadowsocks" -> Protocole.SHADOWSOCKS
+                          else -> null
+                      } ?: continue
+                      val settings = c.optJSONObject("settings") ?: continue
+                      val entree = (settings.optJSONArray("vnext") ?: settings.optJSONArray("servers"))
+                          ?.optJSONObject(0) ?: continue
+                      val hote = entree.optString("address")
+                      val port = entree.optInt("port", -1)
+                      if (!valide(hote, port)) continue
+                      val nom = racine.optString("remarks").ifBlank { c.optString("tag").ifBlank { hote } }
+                      resultat = Serveur(UUID.randomUUID().toString(), nom, proto, hote, port, pays, texte)
+                      break
+                  }
+                  resultat
+              } catch (e: Exception) {
+                  null
+              }
+
+              private fun decoderB64(s: String): String {
+                  var n = s.trim().replace('-', '+').replace('_', '/').replace("\n", "").replace("\r", "")
+                  while (n.length % 4 != 0) n += "="
+                  return String(Base64.decode(n, Base64.DEFAULT), Charsets.UTF_8)
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/EcranAccueil.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/EcranAccueil.kt' <<'LORDEOF'
+          package com.lordvpn.ui
+
+          import androidx.compose.foundation.BorderStroke
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.PowerSettingsNew
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.lifecycle.compose.collectAsStateWithLifecycle
+          import com.lordvpn.data.DepotServeurs
+          import com.lordvpn.ui.theme.*
+          import com.lordvpn.vpn.Statut
+          import com.lordvpn.vpn.VpnState
+
+          @Composable
+          fun EcranAccueil() {
+              val statut by VpnState.statut.collectAsStateWithLifecycle()
+              val serveurs by DepotServeurs.serveurs.collectAsStateWithLifecycle()
+              val selection by DepotServeurs.selectionId.collectAsStateWithLifecycle()
+              val serveur = serveurs.firstOrNull { it.id == selection }
+              var info by remember { mutableStateOf<String?>(null) }
+
+              val couleur = when (statut) {
+                  Statut.CONNECTE -> Vert
+                  Statut.CONNEXION -> Orange
+                  Statut.DECONNECTE -> Rouge
+              }
+              val libelle = when (statut) {
+                  Statut.CONNECTE -> "Connecté"
+                  Statut.CONNEXION -> "Connexion en cours…"
+                  Statut.DECONNECTE -> "Déconnecté"
+              }
+
+              Column(
+                  Modifier.fillMaxSize().padding(24.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.spacedBy(20.dp)
+              ) {
+                  Spacer(Modifier.height(24.dp))
+                  Text("LORD VPN", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = BleuElectrique)
+
+                  Spacer(Modifier.height(16.dp))
+                  Surface(
+                      onClick = {
+                          info = if (serveur == null) {
+                              "Aucun serveur configuré. Ajoutez-en un dans l'onglet Serveurs."
+                          } else {
+                              "Moteur VPN pas encore installé : la connexion réelle arrive à la prochaine étape."
+                          }
+                      },
+                      shape = CircleShape,
+                      color = BleuNuit,
+                      border = BorderStroke(4.dp, couleur),
+                      modifier = Modifier.size(180.dp)
+                  ) {
+                      Box(contentAlignment = Alignment.Center) {
+                          Icon(
+                              Icons.Filled.PowerSettingsNew, contentDescription = "Connecter",
+                              tint = couleur, modifier = Modifier.size(80.dp)
+                          )
+                      }
+                  }
+                  Text(
+                      if (statut == Statut.DECONNECTE) "CONNECT" else "DISCONNECT",
+                      fontWeight = FontWeight.Bold, letterSpacing = 2.sp
+                  )
+                  Text(libelle, color = couleur, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                  info?.let {
+                      Text(it, color = TexteSecondaire, textAlign = TextAlign.Center, fontSize = 13.sp)
+                  }
+
+                  Card(
+                      colors = CardDefaults.cardColors(containerColor = BleuNuit),
+                      shape = RoundedCornerShape(16.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Ligne("Serveur", serveur?.let { "${it.nom} (${it.protocole.libelle})" } ?: "Aucun")
+                          Ligne("Temps de connexion", "—")
+                          Ligne("Téléchargement", "—")
+                          Ligne("Envoi", "—")
+                          Ligne("Données consommées", "—")
+                          Ligne("Adresse IP publique", "—")
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun Ligne(nom: String, valeur: String) {
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                  Text(nom, color = TexteSecondaire)
+                  Text(valeur, fontWeight = FontWeight.Medium)
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/EcranImportation.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/EcranImportation.kt' <<'LORDEOF'
+          package com.lordvpn.ui
+
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.platform.LocalClipboardManager
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.lifecycle.compose.collectAsStateWithLifecycle
+          import com.lordvpn.data.DepotServeurs
+          import com.lordvpn.data.PAYS
+          import com.lordvpn.parser.ParseurConfig
+          import com.lordvpn.ui.theme.*
+          import java.io.ByteArrayOutputStream
+          import java.io.InputStream
+
+          private const val TAILLE_MAX = 1_000_000
+
+          @Composable
+          fun EcranImportation() {
+              val ctx = LocalContext.current
+              val presse = LocalClipboardManager.current
+              val serveurs by DepotServeurs.serveurs.collectAsStateWithLifecycle()
+              var message by remember { mutableStateOf<String?>(null) }
+              var pays by remember { mutableStateOf("Autres pays") }
+
+              val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) message = importerDepuis(ctx, uri, pays)
+              }
+              val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+                  if (uri != null) message = exporterVers(ctx, uri)
+              }
+
+              Column(
+                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+                  verticalArrangement = Arrangement.spacedBy(12.dp)
+              ) {
+                  Text("Import / Export", style = MaterialTheme.typography.headlineSmall)
+                  Text(
+                      "Formats : liens vless://, vmess://, trojan://, ss://, ssh:// (un par ligne) " +
+                          "et fichiers JSON Xray.",
+                      color = TexteSecondaire, fontSize = 13.sp
+                  )
+
+                  Text("Pays des serveurs importés", color = TexteSecondaire)
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      PAYS.forEach { p ->
+                          FilterChip(selected = pays == p, onClick = { pays = p }, label = { Text(p) })
+                      }
+                  }
+
+                  Button(onClick = { importer.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) {
+                      Text("Importer un fichier")
+                  }
+                  Button(
+                      onClick = {
+                          val texte = presse.getText()?.text ?: ""
+                          val lus = ParseurConfig.parseTexte(texte, pays)
+                          message = if (lus.isEmpty()) {
+                              "Le presse-papiers ne contient aucune configuration reconnue."
+                          } else {
+                              val n = DepotServeurs.ajouter(lus)
+                              "$n serveur(s) ajouté(s) depuis le presse-papiers."
+                          }
+                      },
+                      modifier = Modifier.fillMaxWidth()
+                  ) { Text("Coller depuis le presse-papiers") }
+
+                  HorizontalDivider(color = BleuNuitClair)
+
+                  Text(
+                      "Attention : l'export contient vos identifiants en clair. Ne le partagez qu'avec des personnes de confiance.",
+                      color = Orange, fontSize = 13.sp
+                  )
+                  OutlinedButton(
+                      onClick = { exporter.launch("lordvpn-configurations.txt") },
+                      enabled = serveurs.isNotEmpty(),
+                      modifier = Modifier.fillMaxWidth()
+                  ) { Text("Exporter dans un fichier") }
+                  OutlinedButton(
+                      onClick = {
+                          val envoi = Intent(Intent.ACTION_SEND).apply {
+                              type = "text/plain"
+                              putExtra(Intent.EXTRA_TEXT, DepotServeurs.exporterTexte())
+                          }
+                          ctx.startActivity(Intent.createChooser(envoi, "Partager les configurations"))
+                      },
+                      enabled = serveurs.isNotEmpty(),
+                      modifier = Modifier.fillMaxWidth()
+                  ) { Text("Partager") }
+
+                  message?.let { Text(it, color = BleuElectrique) }
+              }
+          }
+
+          private fun lireLimite(flux: InputStream): ByteArray? {
+              val sortie = ByteArrayOutputStream()
+              val tampon = ByteArray(8192)
+              while (true) {
+                  val n = flux.read(tampon)
+                  if (n < 0) break
+                  sortie.write(tampon, 0, n)
+                  if (sortie.size() > TAILLE_MAX) return null
+              }
+              return sortie.toByteArray()
+          }
+
+          private fun importerDepuis(ctx: Context, uri: Uri, pays: String): String = try {
+              val octets = ctx.contentResolver.openInputStream(uri)?.use { lireLimite(it) }
+              if (octets == null) {
+                  "Fichier illisible ou trop volumineux (1 Mo maximum)."
+              } else {
+                  val lus = ParseurConfig.parseTexte(String(octets, Charsets.UTF_8), pays)
+                  if (lus.isEmpty()) {
+                      "Aucune configuration reconnue dans ce fichier."
+                  } else {
+                      val n = DepotServeurs.ajouter(lus)
+                      "$n serveur(s) importé(s) (${lus.size - n} doublon(s) ignoré(s))."
+                  }
+              }
+          } catch (e: Exception) {
+              "Erreur de lecture du fichier."
+          }
+
+          private fun exporterVers(ctx: Context, uri: Uri): String = try {
+              ctx.contentResolver.openOutputStream(uri)?.use {
+                  it.write(DepotServeurs.exporterTexte().toByteArray(Charsets.UTF_8))
+              }
+              "Configurations exportées."
+          } catch (e: Exception) {
+              "Échec de l'exportation."
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/EcranServeurs.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/EcranServeurs.kt' <<'LORDEOF'
+          package com.lordvpn.ui
+
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Edit
+          import androidx.compose.material.icons.filled.Speed
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.lifecycle.compose.collectAsStateWithLifecycle
+          import com.lordvpn.data.DepotServeurs
+          import com.lordvpn.data.PAYS
+          import com.lordvpn.data.Ping
+          import com.lordvpn.data.Serveur
+          import com.lordvpn.parser.ParseurConfig
+          import com.lordvpn.ui.theme.*
+          import kotlinx.coroutines.launch
+
+          @Composable
+          fun EcranServeurs() {
+              val serveurs by DepotServeurs.serveurs.collectAsStateWithLifecycle()
+              val selection by DepotServeurs.selectionId.collectAsStateWithLifecycle()
+              var filtre by remember { mutableStateOf<String?>(null) }
+              // -2 = test en cours, -1 = hors ligne, >= 0 = ping en ms
+              val pings = remember { mutableStateMapOf<String, Long>() }
+              var ajout by remember { mutableStateOf(false) }
+              var edition by remember { mutableStateOf<Serveur?>(null) }
+              var aSupprimer by remember { mutableStateOf<Serveur?>(null) }
+              val scope = rememberCoroutineScope()
+
+              val affiches = serveurs.filter { filtre == null || it.pays == filtre }
+
+              val tester: (Serveur) -> Unit = { s ->
+                  pings[s.id] = -2L
+                  scope.launch { pings[s.id] = Ping.mesurer(s.hote, s.port) ?: -1L }
+              }
+
+              Box(Modifier.fillMaxSize()) {
+                  Column(Modifier.fillMaxSize()) {
+                      Text(
+                          "Serveurs",
+                          style = MaterialTheme.typography.headlineSmall,
+                          modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
+                      )
+                      Row(
+                          Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          FilterChip(selected = filtre == null, onClick = { filtre = null }, label = { Text("Tous") })
+                          PAYS.forEach { p ->
+                              FilterChip(selected = filtre == p, onClick = { filtre = p }, label = { Text(p) })
+                          }
+                      }
+                      TextButton(
+                          onClick = { affiches.forEach { tester(it) } },
+                          enabled = affiches.isNotEmpty(),
+                          modifier = Modifier.padding(start = 8.dp)
+                      ) { Text("Tester tous les serveurs affichés") }
+
+                      if (affiches.isEmpty()) {
+                          Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                              Text(
+                                  "Aucun serveur.\nTouchez + pour en ajouter un, ou utilisez l'onglet Import.",
+                                  color = TexteSecondaire
+                              )
+                          }
+                      } else {
+                          LazyColumn(
+                              contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
+                              verticalArrangement = Arrangement.spacedBy(10.dp)
+                          ) {
+                              items(affiches, key = { it.id }) { s ->
+                                  CarteServeur(
+                                      s = s,
+                                      choisi = s.id == selection,
+                                      ping = pings[s.id],
+                                      onChoisir = { DepotServeurs.selectionner(s.id) },
+                                      onTester = { tester(s) },
+                                      onModifier = { edition = s },
+                                      onSupprimer = { aSupprimer = s }
+                                  )
+                              }
+                          }
+                      }
+                  }
+                  FloatingActionButton(
+                      onClick = { ajout = true },
+                      containerColor = BleuElectrique,
+                      modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+                  ) { Icon(Icons.Filled.Add, contentDescription = "Ajouter un serveur") }
+              }
+
+              if (ajout) DialogServeur(null) { ajout = false }
+              edition?.let { s -> DialogServeur(s) { edition = null } }
+              aSupprimer?.let { s ->
+                  AlertDialog(
+                      onDismissRequest = { aSupprimer = null },
+                      title = { Text("Supprimer ce serveur ?") },
+                      text = { Text(s.nom) },
+                      confirmButton = {
+                          TextButton(onClick = { DepotServeurs.supprimer(s.id); aSupprimer = null }) { Text("Supprimer") }
+                      },
+                      dismissButton = { TextButton(onClick = { aSupprimer = null }) { Text("Annuler") } }
+                  )
+              }
+          }
+
+          @Composable
+          private fun CarteServeur(
+              s: Serveur,
+              choisi: Boolean,
+              ping: Long?,
+              onChoisir: () -> Unit,
+              onTester: () -> Unit,
+              onModifier: () -> Unit,
+              onSupprimer: () -> Unit
+          ) {
+              val (texte, couleur) = when {
+                  ping == null -> "—" to TexteSecondaire
+                  ping == -2L -> "Test…" to Orange
+                  ping == -1L -> "Hors ligne" to Rouge
+                  else -> "$ping ms" to Vert
+              }
+              Card(
+                  colors = CardDefaults.cardColors(containerColor = BleuNuit),
+                  shape = RoundedCornerShape(16.dp),
+                  modifier = Modifier.fillMaxWidth()
+              ) {
+                  Row(Modifier.padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                      RadioButton(selected = choisi, onClick = onChoisir)
+                      Column(Modifier.weight(1f)) {
+                          Text(s.nom, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          Text(
+                              "${s.protocole.libelle} · ${s.hote}:${s.port}",
+                              color = TexteSecondaire, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                          )
+                          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                              Text(s.pays, color = BleuElectrique, fontSize = 12.sp)
+                              Text(texte, color = couleur, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                          }
+                      }
+                      IconButton(onClick = onTester) { Icon(Icons.Filled.Speed, contentDescription = "Tester") }
+                      IconButton(onClick = onModifier) { Icon(Icons.Filled.Edit, contentDescription = "Modifier") }
+                      IconButton(onClick = onSupprimer) { Icon(Icons.Filled.Delete, contentDescription = "Supprimer") }
+                  }
+              }
+          }
+
+          /** Ajout (serveur == null) ou modification d'une configuration. */
+          @Composable
+          private fun DialogServeur(serveur: Serveur?, onFermer: () -> Unit) {
+              var lien by remember { mutableStateOf(serveur?.brut ?: "") }
+              var nom by remember { mutableStateOf(serveur?.nom ?: "") }
+              var pays by remember { mutableStateOf(serveur?.pays ?: "Autres pays") }
+              var erreur by remember { mutableStateOf<String?>(null) }
+
+              AlertDialog(
+                  onDismissRequest = onFermer,
+                  title = { Text(if (serveur == null) "Ajouter un serveur" else "Modifier le serveur") },
+                  text = {
+                      Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          OutlinedTextField(
+                              value = lien,
+                              onValueChange = { lien = it },
+                              label = { Text("Lien (vless://, vmess://, trojan://, ss://, ssh://) ou JSON") },
+                              minLines = 3,
+                              maxLines = 8,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+                          OutlinedTextField(
+                              value = nom,
+                              onValueChange = { nom = it },
+                              label = { Text("Nom (facultatif)") },
+                              singleLine = true,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+                          Text("Pays", color = TexteSecondaire)
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              PAYS.forEach { p ->
+                                  FilterChip(selected = pays == p, onClick = { pays = p }, label = { Text(p) })
+                              }
+                          }
+                          erreur?.let { Text(it, color = Rouge, fontSize = 13.sp) }
+                      }
+                  },
+                  confirmButton = {
+                      TextButton(onClick = {
+                          val lus = ParseurConfig.parseTexte(lien, pays)
+                          if (lus.isEmpty()) {
+                              erreur = "Configuration non reconnue. Vérifiez le lien ou le JSON."
+                          } else {
+                              val nommes = lus.map {
+                                  it.copy(nom = if (lus.size == 1 && nom.isNotBlank()) nom else it.nom)
+                              }
+                              if (serveur == null) {
+                                  DepotServeurs.ajouter(nommes)
+                              } else {
+                                  DepotServeurs.remplacer(serveur.id, nommes.first().copy(id = serveur.id))
+                              }
+                              onFermer()
+                          }
+                      }) { Text("Enregistrer") }
+                  },
+                  dismissButton = { TextButton(onClick = onFermer) { Text("Annuler") } }
+              )
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/Navigation.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/Navigation.kt' <<'LORDEOF'
+          package com.lordvpn.ui
+
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.unit.dp
+          import androidx.navigation.NavHostController
+          import androidx.navigation.compose.*
+
+          enum class Ecran(val route: String, val titre: String, val icone: ImageVector) {
+              Accueil("accueil", "Accueil", Icons.Filled.Shield),
+              Serveurs("serveurs", "Serveurs", Icons.Filled.Dns),
+              Importation("importation", "Import", Icons.Filled.FileUpload),
+              Historique("historique", "Historique", Icons.Filled.History),
+              Parametres("parametres", "Réglages", Icons.Filled.Settings),
+              ConfigPerso("config", "Configuration personnalisée", Icons.Filled.Tune),
+              Abonnement("abonnement", "Abonnement", Icons.Filled.Star),
+              APropos("apropos", "À propos", Icons.Filled.Info)
+          }
+
+          private val barreBasse = listOf(
+              Ecran.Accueil, Ecran.Serveurs, Ecran.Importation, Ecran.Historique, Ecran.Parametres
+          )
+
+          @Composable
+          fun LordVpnApp(nav: NavHostController) {
+              val entree by nav.currentBackStackEntryAsState()
+              val routeActuelle = entree?.destination?.route
+
+              Scaffold(
+                  containerColor = MaterialTheme.colorScheme.background,
+                  bottomBar = {
+                      NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                          barreBasse.forEach { ecran ->
+                              NavigationBarItem(
+                                  selected = routeActuelle == ecran.route,
+                                  onClick = {
+                                      nav.navigate(ecran.route) {
+                                          popUpTo(Ecran.Accueil.route)
+                                          launchSingleTop = true
+                                      }
+                                  },
+                                  icon = { Icon(ecran.icone, contentDescription = ecran.titre) },
+                                  label = { Text(ecran.titre, maxLines = 1) },
+                                  colors = NavigationBarItemDefaults.colors(
+                                      selectedIconColor = MaterialTheme.colorScheme.onPrimary,
+                                      indicatorColor = MaterialTheme.colorScheme.primary
+                                  )
+                              )
+                          }
+                      }
+                  }
+              ) { marges ->
+                  NavHost(
+                      navController = nav,
+                      startDestination = Ecran.Accueil.route,
+                      modifier = Modifier.padding(marges)
+                  ) {
+                      composable(Ecran.Accueil.route) { EcranAccueil() }
+                      composable(Ecran.Serveurs.route) { EcranServeurs() }
+                      composable(Ecran.Importation.route) { EcranImportation() }
+                      composable(Ecran.Historique.route) { EcranTemporaire("Historique des connexions") }
+                      composable(Ecran.Parametres.route) { EcranParametres(nav) }
+                      composable(Ecran.ConfigPerso.route) { EcranTemporaire("Configuration personnalisée") }
+                      composable(Ecran.Abonnement.route) { EcranTemporaire("Abonnement") }
+                      composable(Ecran.APropos.route) { EcranTemporaire("À propos de LORD VPN") }
+                  }
+              }
+          }
+
+          @Composable
+          fun EcranTemporaire(titre: String) {
+              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                  Text(titre, style = MaterialTheme.typography.headlineSmall)
+              }
+          }
+
+          @Composable
+          fun EcranParametres(nav: NavHostController) {
+              Column(
+                  Modifier.fillMaxSize().padding(24.dp),
+                  verticalArrangement = Arrangement.spacedBy(12.dp)
+              ) {
+                  Text("Paramètres", style = MaterialTheme.typography.headlineSmall)
+                  listOf(Ecran.ConfigPerso, Ecran.Abonnement, Ecran.APropos).forEach { e ->
+                      Button(onClick = { nav.navigate(e.route) }, modifier = Modifier.fillMaxWidth()) {
+                          Text(e.titre)
+                      }
+                  }
+              }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/theme/Color.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/theme/Color.kt' <<'LORDEOF'
+          package com.lordvpn.ui.theme
+
+          import androidx.compose.ui.graphics.Color
+
+          val Noir = Color(0xFF05070D)
+          val BleuNuit = Color(0xFF0B1426)
+          val BleuNuitClair = Color(0xFF14223F)
+          val BleuElectrique = Color(0xFF1E90FF)
+          val TexteClair = Color(0xFFEAF1FF)
+          val TexteSecondaire = Color(0xFF8FA3C7)
+          val Vert = Color(0xFF2ECC71)
+          val Rouge = Color(0xFFE74C3C)
+          val Orange = Color(0xFFF39C12)
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/theme/Theme.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/theme/Theme.kt' <<'LORDEOF'
+          package com.lordvpn.ui.theme
+
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+
+          private val SchemaSombre = darkColorScheme(
+              primary = BleuElectrique,
+              onPrimary = Noir,
+              background = Noir,
+              onBackground = TexteClair,
+              surface = BleuNuit,
+              onSurface = TexteClair,
+              surfaceVariant = BleuNuitClair,
+              onSurfaceVariant = TexteSecondaire,
+              error = Rouge
+          )
+
+          @Composable
+          fun LordVpnTheme(content: @Composable () -> Unit) {
+              MaterialTheme(colorScheme = SchemaSombre, typography = Typography, content = content)
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/ui/theme/Type.kt')"
+          cat > 'app/src/main/java/com/lordvpn/ui/theme/Type.kt' <<'LORDEOF'
+          package com.lordvpn.ui.theme
+
+          import androidx.compose.material3.Typography
+
+          val Typography = Typography()
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/java/com/lordvpn/vpn/VpnState.kt')"
+          cat > 'app/src/main/java/com/lordvpn/vpn/VpnState.kt' <<'LORDEOF'
+          package com.lordvpn.vpn
+
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+
+          enum class Statut { DECONNECTE, CONNEXION, CONNECTE }
+
+          /** État réel du VPN. Sera piloté par LordVpnService (étape 2). */
+          object VpnState {
+              private val _statut = MutableStateFlow(Statut.DECONNECTE)
+              val statut: StateFlow<Statut> = _statut
+
+              fun definirStatut(s: Statut) { _statut.value = s }
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/res/drawable/ic_launcher_foreground.xml')"
+          cat > 'app/src/main/res/drawable/ic_launcher_foreground.xml' <<'LORDEOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#1E90FF"
+                  android:pathData="M54,24 L78,33 L78,54 C78,68 68,78 54,84 C40,78 30,68 30,54 L30,33 Z"/>
+              <path android:fillColor="#05070D"
+                  android:pathData="M49,50 L59,50 L59,62 L49,62 Z"/>
+              <path android:strokeColor="#05070D" android:strokeWidth="3" android:fillColor="#00000000"
+                  android:pathData="M51,50 L51,46 C51,41 57,41 57,46 L57,50"/>
+          </vector>
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml')"
+          cat > 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml' <<'LORDEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/res/values/ic_launcher_background.xml')"
+          cat > 'app/src/main/res/values/ic_launcher_background.xml' <<'LORDEOF'
+          <resources>
+              <color name="ic_launcher_background">#05070D</color>
+          </resources>
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/res/values/strings.xml')"
+          cat > 'app/src/main/res/values/strings.xml' <<'LORDEOF'
+          <resources>
+              <string name="app_name">LORD VPN</string>
+          </resources>
+          LORDEOF
+          mkdir -p "$(dirname 'app/src/main/res/values/themes.xml')"
+          cat > 'app/src/main/res/values/themes.xml' <<'LORDEOF'
+          <resources>
+              <style name="Theme.LordVpn" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#05070D</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          LORDEOF
+          mkdir -p "$(dirname 'build.gradle.kts')"
+          cat > 'build.gradle.kts' <<'LORDEOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          LORDEOF
+          mkdir -p "$(dirname 'gradle.properties')"
+          cat > 'gradle.properties' <<'LORDEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          LORDEOF
+          mkdir -p "$(dirname 'settings.gradle.kts')"
+          cat > 'settings.gradle.kts' <<'LORDEOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "LORD VPN"
+          include(":app")
+          LORDEOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Compiler l'APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LORD-VPN-debug-apk
+          path: proj/app/build/outputs/apk/debug/*.apk
